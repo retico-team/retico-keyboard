@@ -1,7 +1,7 @@
 import time
 import tkinter as tk
-from tkinter import ttk
 from threading import Thread
+from tkinter import ttk
 from retico_core import AbstractProducingModule, UpdateMessage, UpdateType
 from retico_core.text import TextIU
 
@@ -24,6 +24,11 @@ class KeyboardModule(AbstractProducingModule):
         '<Prior>',
         '<Next>',
         '<Return>',
+    ]
+    RESTRICTED_STACK_ACTIONS = [
+        '<Button-1>',
+        '<ButtonPress-1>',
+        '<B1-Motion>',
     ]
     FONT = "Segoe UI"
 
@@ -82,25 +87,97 @@ class KeyboardModule(AbstractProducingModule):
         entry_label = ttk.Label(left_frame, text='Input', style='Header.TLabel')
         entry_label.grid(row=0, column=0, sticky='w', pady=(0, 10))
 
-        self.text = tk.Text(
+        def _update_stack(um):
+            for iu, ut in um:
+                if ut == UpdateType.ADD:
+                    verb = 'ADD'
+                elif ut == UpdateType.REVOKE:
+                    verb = 'REVOKE'
+                elif ut == UpdateType.COMMIT:
+                    verb = 'COMMIT'
+                else:
+                    raise NotImplementedError
+                stack.insert(0, f' {iu.payload} -- {verb}')
+
+        def _on_key_press(event):
+            self.current = text.index('insert')
+
+            if event.keysym == 'space' and self.start_word: return
+            if event.keysym == 'space' and text.compare(self.new_tag_start, '!=', f"{self.current}"):
+                new_word = text.get(self.new_tag_start, self.current).strip()
+                text.tag_add('add', self.new_tag_start, self.current)
+
+                iu = self.create_iu()
+                iu.payload = new_word
+                iu.tag_range = (self.new_tag_start, self.current)
+                self.current_output.append(iu)
+
+                um = UpdateMessage.from_iu(iu, UpdateType.ADD)
+                self.append(um)
+                _update_stack(um)
+                self.start_word = True
+                return
+
+            if event.keysym == 'BackSpace' and text.get(self.current, f'{self.current}+1c') != ' ':
+                if len(self.current_output) == 0: return
+                if text.compare(self.current, '<=', self.current_output[-1].tag_range[1]):
+                    iu = self.current_output.pop()
+                    text.delete(iu.tag_range[0], iu.tag_range[1])
+                    um = UpdateMessage.from_iu(iu, UpdateType.REVOKE)
+                    self.append(um)
+                    _update_stack(um)
+                    self.current = text.index('insert')
+                    self.new_tag_start = self.current
+
+            if (event.char != '' and self.start_word) or (len(self.current_output) == 0 and self.start_word):
+                self.new_tag_start = self.current
+                self.start_word = False
+                return
+
+        text = tk.Text(
             left_frame,
             font=(self.FONT, 11), wrap='word', relief='flat', bd=0,
             highlightthickness=1, highlightbackground='#cccccc',
             highlightcolor='#0078d4', padx=10, pady=10
         )
-        self.text.grid(row=1, column=0, sticky='nsew', pady=(0, 10))
-        for action in self.RESTRICTED_CURSOR_ACTIONS: self.text.bind(action, lambda e: 'break')
-        self.text.bind('<KeyPress>', self._on_key_press)
-        self.text.tag_configure('add', background='green')
-        self.new_tag_start = self.text.index('insert')
-        self.text.focus_set()
+        text.grid(row=1, column=0, sticky='nsew', pady=(0, 10))
+        for action in self.RESTRICTED_CURSOR_ACTIONS: text.bind(action, lambda e: 'break')
+        text.bind('<KeyPress>', _on_key_press)
+        text.tag_configure('add', background='green')
+        self.new_tag_start = text.index('insert')
+        text.focus_set()
 
         btn_frame = ttk.Frame(left_frame)
         btn_frame.grid(row=2, column=0, sticky='w')
 
-        commit_btn = ttk.Button(btn_frame, text='Commit', command=self._commit)
+        def _commit():
+            stack.delete(0, tk.END)
+            for iu in self.current_output:
+                um = UpdateMessage.from_iu(iu, UpdateType.COMMIT)
+                self.append(um)
+                _update_stack(um)
+            self.current_output = []
+            text.delete('1.0', tk.END)
+            self.current = text.index('insert')
+            self.start_word = True
+            text.after(1, text.focus_set)
+
+        def _clear_text():
+            stack.delete(0, tk.END)
+            while len(self.current_output) > 0:
+                iu = self.current_output.pop()
+                um = UpdateMessage.from_iu(iu, UpdateType.REVOKE)
+                self.append(um)
+                _update_stack(um)
+            self.current_output = []
+            text.delete('1.0', tk.END)
+            self.current = text.index('insert')
+            self.start_word = True
+            text.after(1, text.focus_set)
+
+        commit_btn = ttk.Button(btn_frame, text='Commit', command=_commit)
         commit_btn.pack(side='right')
-        clear_btn = ttk.Button(btn_frame, text='Clear', command=self._clear_text)
+        clear_btn = ttk.Button(btn_frame, text='Clear', command=_clear_text)
         clear_btn.pack(side='right')
 
         right_frame = ttk.Frame(root, padding=15)
@@ -116,7 +193,7 @@ class KeyboardModule(AbstractProducingModule):
         list_container.columnconfigure(0, weight=1)
         list_container.rowconfigure(0, weight=1)
 
-        self.stack = tk.Listbox(
+        stack = tk.Listbox(
             list_container,
             font=(self.FONT, 11),
             relief='flat',
@@ -127,11 +204,12 @@ class KeyboardModule(AbstractProducingModule):
             selectbackground='#0078d4',
             activestyle='none',
         )
-        self.stack.grid(row=0, column=0, sticky='nsew')
+        stack.grid(row=0, column=0, sticky='nsew')
+        for action in self.RESTRICTED_STACK_ACTIONS: stack.bind(action, lambda e: 'break')
 
-        scrollbar = ttk.Scrollbar(list_container, orient='vertical', command=self.stack.yview)
+        scrollbar = ttk.Scrollbar(list_container, orient='vertical', command=stack.yview)
         scrollbar.grid(row=0, column=1, sticky='ns')
-        self.stack.config(yscrollcommand=scrollbar.set)
+        stack.config(yscrollcommand=scrollbar.set)
 
         bottom_frame = ttk.Frame(root, padding=(15, 10))
         bottom_frame.grid(row=2, column=0, columnspan=2, sticky='ew')
@@ -141,95 +219,22 @@ class KeyboardModule(AbstractProducingModule):
             text='Exit',
             bg='#dc3545',
             fg='white',
-            font=('Segoe UI', 10),
+            font=(self.FONT, 10),
             relief='flat',
             padx=20,
             pady=5,
             cursor='hand2',
+            command=root.destroy,
         )
         exit_btn.pack(side="right")
         exit_btn.bind('<Enter>', lambda e: exit_btn.config(bg='#c82333'))
         exit_btn.bind('<Leave>', lambda e: exit_btn.config(bg='#dc3545'))
-        exit_btn.bind('<Button-1>', self._exit)
 
         root.mainloop()
 
-    def _on_key_press(self, event):
-        self.current = self.text.index('insert')
+    def shutdown(self):
+        self._gui_thread.join(timeout=5)
 
-        if event.keysym == 'space' and self.start_word: return
-        if event.keysym == 'space' and self.text.compare(self.new_tag_start, '!=', f"{self.current}"):
-            new_word = self.text.get(self.new_tag_start, self.current).strip()
-            self.text.tag_add('add', self.new_tag_start, self.current)
-
-            iu = self.create_iu()
-            iu.payload = new_word
-            iu.tag_range = (self.new_tag_start, self.current)
-            self.current_output.append(iu)
-
-            um = UpdateMessage.from_iu(iu, UpdateType.ADD)
-            self.append(um)
-            self._update_stack(um)
-            self.start_word = True
-            return
-
-        if event.keysym == 'BackSpace' and self.text.get(self.current, f'{self.current}+1c') != ' ':
-            if len(self.current_output) == 0: return
-            if self.text.compare(self.current, '<=', self.current_output[-1].tag_range[1]):
-                iu = self.current_output.pop()
-                self.text.delete(iu.tag_range[0], iu.tag_range[1])
-                um = UpdateMessage.from_iu(iu, UpdateType.REVOKE)
-                self.append(um)
-                self._update_stack(um)
-                self.current = self.text.index('insert')
-                self.new_tag_start = self.current
-
-        if (event.char != '' and self.start_word) or (len(self.current_output) == 0 and self.start_word):
-            self.new_tag_start = self.current
-            self.start_word = False
-            return
-
-    def _clear_text(self):
-        self.stack.delete(0, tk.END)
-        while len(self.current_output) > 0:
-            iu = self.current_output.pop()
-            um = UpdateMessage.from_iu(iu, UpdateType.REVOKE)
-            self.append(um)
-            self._update_stack(um)
-        self.current_output = []
-        self.text.delete('1.0', tk.END)
-        self.current = self.text.index('insert')
-        self.start_word = True
-        self.text.after(1, self.text.focus_set)
-
-    def _commit(self):
-        self.stack.delete(0, tk.END)
-        for iu in self.current_output:
-            um = UpdateMessage.from_iu(iu, UpdateType.COMMIT)
-            self.append(um)
-            self._update_stack(um)
-        self.current_output = []
-        self.text.delete('1.0', tk.END)
-        self.current = self.text.index('insert')
-        self.start_word = True
-        self.text.after(1, self.text.focus_set)
-
-    def _update_stack(self, um):
-        for iu, ut in um:
-            if ut == UpdateType.ADD:
-                verb = 'ADD'
-            elif ut == UpdateType.REVOKE:
-                verb = 'REVOKE'
-            elif ut == UpdateType.COMMIT:
-                verb = 'COMMIT'
-            else:
-                raise NotImplementedError
-            self.stack.insert(0, f' {iu.payload} -- {verb}')
-
-    @staticmethod
-    def _exit(event):
-        root = event.widget.winfo_toplevel()
-        root.destroy()
 
 class TkTextIU(TextIU):
     """A TextIU wrapper for the Tkinter Text widget."""
