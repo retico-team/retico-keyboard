@@ -24,3 +24,9 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Programming Language :: Python",
 ]
+
+[project.urls]
+Repository = "https://github.com/retico-team/retico-keyboard"
+
+[tool.setuptools_scm]
+version_file = "retico_keyboard/version.py"
